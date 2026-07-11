@@ -637,13 +637,29 @@ app.post("/v1/delegate", async (req: Request, res: Response) => {
 app.post("/v1/detect-ai", upload.single("file"), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: "No file provided" });
 
+  // ── Tier check — Sightengine only for enterprise ──────────────────────────
+  const tier = (req.headers["x-trace-tier"] as string) || "free";
+  const isEnterprise = tier === "enterprise";
+
   const apiUser   = process.env.SIGHTENGINE_USER;
   const apiSecret = process.env.SIGHTENGINE_SECRET;
 
-  if (!apiUser || !apiSecret) {
-    return res.json({ score: localAiEstimate(req.file.buffer), source: "local", signals: ["Local analysis only"] });
+  // Non-enterprise or no API keys → instant local estimate, no external call
+  if (!isEnterprise || !apiUser || !apiSecret) {
+    const score = localAiEstimate(req.file.buffer);
+    return res.json({
+      score,
+      source: "local",
+      signals: [
+        isEnterprise
+          ? "Local analysis only — Sightengine keys not configured"
+          : "Local analysis — upgrade to Enterprise for deep AI detection",
+      ],
+      enterprise_available: !isEnterprise,
+    });
   }
 
+  // Enterprise path — call Sightengine
   try {
     const form = new FormData();
     form.append("media", new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
