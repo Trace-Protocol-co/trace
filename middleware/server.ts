@@ -35,6 +35,7 @@ import {
 } from "./db.js";
 
 const app = express();
+app.set("trust proxy", 1); // Trust Render proxy for accurate IP detection
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173,http://localhost:3000")
