@@ -648,11 +648,17 @@ app.post("/agent/verify", upload.single("file"), async (req: Request, res: Respo
       filename = req.file.originalname;
     } else if (req.body?.url || req.body?.image_url) {
       const url = req.body.url || req.body.image_url;
-      const response = await fetch(url);
-      if (!response.ok) return res.status(400).json({ error: "Could not fetch media from URL" });
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; TRACE-Protocol/1.0; +https://traceprotocol.co)",
+          "Accept": "image/*,*/*",
+        },
+      });
+      if (!response.ok) return res.status(400).json({ error: `Could not fetch media from URL: HTTP ${response.status}` });
       fileBuffer = Buffer.from(await response.arrayBuffer());
-      mimeType = response.headers.get("content-type") || "image/jpeg";
-      filename = url.split("/").pop() || "media";
+      mimeType = response.headers.get("content-type")?.split(";")[0] || "image/jpeg";
+      filename = url.split("/").pop()?.split("?")[0] || "media";
     } else {
       return res.status(400).json({ error: "Provide a file upload or url in request body" });
     }
