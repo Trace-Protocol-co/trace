@@ -630,6 +630,175 @@ app.post("/v1/delegate", async (req: Request, res: Response) => {
   }
 });
 
+
+// ============================================================================
+// POST /agent/verify — Agent-optimized media verification endpoint
+// Designed for OKX.AI ASP and agent-to-agent calls
+// ============================================================================
+app.post("/agent/verify", upload.single("file"), async (req: Request, res: Response) => {
+  try {
+    // Support both file upload and URL-based verification
+    let fileBuffer: Buffer | null = null;
+    let mimeType = "image/jpeg";
+    let filename = "media";
+
+    if (req.file) {
+      fileBuffer = req.file.buffer;
+      mimeType = req.file.mimetype;
+      filename = req.file.originalname;
+    } else if (req.body?.url || req.body?.image_url) {
+      const url = req.body.url || req.body.image_url;
+      const response = await fetch(url);
+      if (!response.ok) return res.status(400).json({ error: "Could not fetch media from URL" });
+      fileBuffer = Buffer.from(await response.arrayBuffer());
+      mimeType = response.headers.get("content-type") || "image/jpeg";
+      filename = url.split("/").pop() || "media";
+    } else {
+      return res.status(400).json({ error: "Provide a file upload or url in request body" });
+    }
+
+    const bytes          = new Uint8Array(fileBuffer);
+    const { raw: cHash } = sha256(bytes);
+    const pHash          = computePerceptualHash(bytes);
+    const contentHashHex = Buffer.from(cHash).toString("hex");
+    const pHashHex       = Buffer.from(pHash).toString("hex");
+    const mediaType      = mimeType.split("/")[0] ?? "image";
+    const platform       = (req.headers["x-platform"] as string) ?? "agent";
+
+    const { buildSighting, writeSightingToBank, queryBank } = await import("../agent/sighting.js");
+
+    const persistSighting = (s: ReturnType<typeof buildSighting>, blob: string | null, v: string) =>
+      dbSaveSighting({
+        sightingId:    s.sighting_id,
+        contentHash:   s.media_fingerprint.content_hash,
+        perceptualHash: s.media_fingerprint.perceptual_hash,
+        mediaType:     s.media_fingerprint.media_type,
+        verdict:       v,
+        platform,
+        memwalBlobId:  blob,
+        suiObjectId:   s.trace_registry_status.sui_object_id,
+        registered:    s.trace_registry_status.registered,
+      }).catch(() => {});
+
+    const summaries: Record<string, { summary: string; action: string }> = {
+      VERIFIED_ORIGINAL: {
+        summary: "This media has cryptographic proof of origin anchored on the Sui blockchain. The SHA-256 hash matches a registered MediaRecord.",
+        action: "SAFE — media is verified original. Safe to cite and act upon."
+      },
+      MODIFIED: {
+        summary: "This media is a derivative of a registered original. Visual similarity detected via perceptual hashing. The original was modified before redistribution.",
+        action: "CAUTION — media has been altered from the registered original. Verify intent before acting."
+      },
+      AI_GENERATED: {
+        summary: "This media shows strong indicators of AI generation based on entropy analysis. Probability exceeds 75% synthetic threshold.",
+        action: "WARNING — likely AI-generated content. Do not cite as real-world evidence."
+      },
+      UNVERIFIED: {
+        summary: "This media has no registered provenance on the TRACE network. It may be authentic but lacks cryptographic proof of origin.",
+        action: "UNKNOWN — no provenance found. Exercise caution when citing as verified source."
+      },
+    };
+
+    // Step 1 — Exact match
+    const exact = await dbGetByHash(contentHashHex);
+    if (exact) {
+      const sighting = buildSighting({ contentHash: contentHashHex, perceptualHash: pHashHex, mediaType, verdict: "VERIFIED_ORIGINAL", platform, registryEntry: { mediaId: exact.mediaId, timestamp: exact.timestamp } });
+      const bankBlob = await writeSightingToBank(sighting);
+      await persistSighting(sighting, bankBlob, "VERIFIED_ORIGINAL");
+      return res.json({
+        verdict: "VERIFIED_ORIGINAL",
+        confidence: 1.0,
+        summary: summaries.VERIFIED_ORIGINAL.summary,
+        action_recommendation: summaries.VERIFIED_ORIGINAL.action,
+        origin: { first_seen: new Date(exact.timestamp).toISOString(), creator: exact.creator, sui_tx: exact.suiTx, walrus_blob: exact.blobId },
+        ai_score: 0,
+        sighting_count: 1,
+        provenance_chain: [],
+        flags: exact.revoked ? ["REVOKED"] : [],
+        trace_explorer: `https://www.traceprotocol.co/explorer`,
+        bank_blob_id: bankBlob,
+        powered_by: "TRACE Protocol — traceprotocol.co",
+      });
+    }
+
+    // Step 2 — Bank history
+    const bankHistory = await queryBank(contentHashHex);
+    if (bankHistory.known) {
+      const sighting = buildSighting({ contentHash: contentHashHex, perceptualHash: pHashHex, mediaType, verdict: "UNVERIFIED", platform, registryEntry: null });
+      const bankBlob = await writeSightingToBank(sighting);
+      await persistSighting(sighting, bankBlob, "UNVERIFIED");
+      return res.json({
+        verdict: "UNVERIFIED",
+        confidence: 0.6,
+        summary: `This media has no registered provenance but has been sighted ${bankHistory.sighting_count} time(s) in the TRACE Collective Memory Bank. First encountered: ${bankHistory.first_seen}.`,
+        action_recommendation: summaries.UNVERIFIED.action,
+        origin: null,
+        ai_score: 0,
+        sighting_count: bankHistory.sighting_count,
+        first_seen: bankHistory.first_seen,
+        sources: bankHistory.sources,
+        provenance_chain: [],
+        flags: ["NOT_IN_REGISTRY", "KNOWN_TO_BANK"],
+        trace_explorer: `https://www.traceprotocol.co/bank`,
+        bank_blob_id: bankBlob,
+        powered_by: "TRACE Protocol — traceprotocol.co",
+      });
+    }
+
+    // Step 3 — pHash similarity
+    let bestMatch: { entry: RegistryEntry; similarity: number } | null = null;
+    for (const entry of dbGetMemRegistry().values()) {
+      const sim = pHashSimilarity(pHashHex, entry.perceptualHash);
+      if (sim > 0.9 && (!bestMatch || sim > bestMatch.similarity)) bestMatch = { entry, similarity: sim };
+    }
+    if (bestMatch) {
+      const sighting = buildSighting({ contentHash: contentHashHex, perceptualHash: pHashHex, mediaType, verdict: "MODIFIED", platform, registryEntry: { mediaId: bestMatch.entry.mediaId, timestamp: bestMatch.entry.timestamp } });
+      const bankBlob = await writeSightingToBank(sighting);
+      await persistSighting(sighting, bankBlob, "MODIFIED");
+      return res.json({
+        verdict: "MODIFIED",
+        confidence: bestMatch.similarity,
+        summary: `This media is a ${(bestMatch.similarity * 100).toFixed(1)}% visual match to a registered original. The content has been altered — cropped, filtered, or otherwise modified — before redistribution.`,
+        action_recommendation: summaries.MODIFIED.action,
+        origin: { first_seen: new Date(bestMatch.entry.timestamp).toISOString(), creator: bestMatch.entry.creator, sui_tx: bestMatch.entry.suiTx, walrus_blob: bestMatch.entry.blobId },
+        ai_score: 0,
+        sighting_count: 1,
+        similarity: bestMatch.similarity,
+        provenance_chain: [],
+        flags: ["UNANCHORED_EDIT_DETECTED"],
+        trace_explorer: `https://www.traceprotocol.co/explorer`,
+        bank_blob_id: bankBlob,
+        powered_by: "TRACE Protocol — traceprotocol.co",
+      });
+    }
+
+    // Step 4 — AI detection
+    const aiScore = estimateAiScore(bytes);
+    const verdict = aiScore >= 7500 ? "AI_GENERATED" : "UNVERIFIED";
+    const sighting = buildSighting({ contentHash: contentHashHex, perceptualHash: pHashHex, mediaType, verdict, platform, registryEntry: null });
+    const bankBlob = await writeSightingToBank(sighting);
+    await persistSighting(sighting, bankBlob, verdict);
+
+    return res.json({
+      verdict,
+      confidence: aiScore / 10000,
+      summary: summaries[verdict].summary,
+      action_recommendation: summaries[verdict].action,
+      origin: null,
+      ai_score: aiScore,
+      sighting_count: 1,
+      provenance_chain: [],
+      flags: aiScore >= 7500 ? ["AI_GENERATED_ESTIMATE"] : ["NOT_IN_REGISTRY"],
+      trace_explorer: "https://www.traceprotocol.co/explorer",
+      bank_blob_id: bankBlob,
+      powered_by: "TRACE Protocol — traceprotocol.co",
+    });
+
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ============================================================================
 // GET /v1/health
 // ============================================================================
