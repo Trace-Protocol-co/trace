@@ -28,5 +28,18 @@ services:
         value: http://www.traceprotocol.co,https://www.traceprotocol.co,http://localhost:5173
       - key: APP_URL
         value: http://www.traceprotocol.co
+      # ── x402 / OKX.AI ASP payment config ──────────────────────────────────
+      - key: X402_PAY_TO
+        value: "0x00dC0f3ff1F2bca6b3d007684cC25a766c9815f4"
+      - key: X402_PRICE
+        value: "0"
+      - key: X402_NETWORK
+        value: eip155:196
+      - key: X402_ASSET
+        value: "0x779ded0c9e1022225f8e0630b35a9b54be713736"
+      # Set to the OKX OnchainOS facilitator URL to verify+settle on-chain.
+      # Leave unset for direct-accept (fee 0) mode.
+      - key: X402_FACILITATOR_URL
+        sync: false
       - key: TRACE_PRIVATE_KEY
         sync: false

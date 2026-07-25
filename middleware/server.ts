@@ -27,6 +27,7 @@ import {
   buildFilChallengeTx,
 } from "./traceProcessor.js";
 import { generateCertificateHTML, CertificateData } from "./certificate.js";
+import { sendChallenge, verifyPayment } from "./x402.js";
 import {
   dbInit, dbSave, dbGetByHash, dbGetById, dbList, dbCount,
   dbGetMemRegistry, dbGetMemRegistryById,
@@ -53,6 +54,8 @@ app.use(cors({
     cb(new Error(`CORS: ${origin} not allowed`));
   },
   credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization", "X-PAYMENT", "X-Platform", "X-Trace-Tier"],
+  exposedHeaders: ["PAYMENT-REQUIRED", "X-PAYMENT-RESPONSE"],
 }));
 app.use(express.json());
 
@@ -632,11 +635,28 @@ app.post("/v1/delegate", async (req: Request, res: Response) => {
 
 
 // ============================================================================
+// GET /agent/verify — Discoverable x402 pricing challenge (unpaid)
+// Lets validators (x402-check / x402-validate) read the accepts array.
+// ============================================================================
+app.get("/agent/verify", (req: Request, res: Response) => {
+  return sendChallenge(req, res, "Payment required — POST with an X-PAYMENT header to run a verification.");
+});
+
+// ============================================================================
 // POST /agent/verify — Agent-optimized media verification endpoint
 // Designed for OKX.AI ASP and agent-to-agent calls
 // ============================================================================
 app.post("/agent/verify", upload.single("file"), async (req: Request, res: Response) => {
   try {
+    // ── x402 gate ─────────────────────────────────────────────────────────
+    // Emit the 402 payment challenge (with the accepts array) BEFORE any
+    // business/body validation. Only run the verification once payment settles.
+    const payment = await verifyPayment(req);
+    if (!payment.ok) {
+      return sendChallenge(req, res, payment.reason);
+    }
+    if (payment.response) res.setHeader("X-PAYMENT-RESPONSE", payment.response);
+
     // Support both file upload and URL-based verification
     let fileBuffer: Buffer | null = null;
     let mimeType = "image/jpeg";
