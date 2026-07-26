@@ -27,7 +27,10 @@ import {
   buildFilChallengeTx,
 } from "./traceProcessor.js";
 import { generateCertificateHTML, CertificateData } from "./certificate.js";
-import { sendChallenge, verifyPayment } from "./x402.js";
+// ── Official OKX Payment SDK (x402) ─────────────────────────────────────────
+import { paymentMiddleware, x402ResourceServer } from "@okxweb3/x402-express";
+import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
+import { OKXFacilitatorClient } from "@okxweb3/x402-core";
 import {
   dbInit, dbSave, dbGetByHash, dbGetById, dbList, dbCount,
   dbGetMemRegistry, dbGetMemRegistryById,
@@ -58,6 +61,62 @@ app.use(cors({
   exposedHeaders: ["PAYMENT-REQUIRED", "X-PAYMENT-RESPONSE"],
 }));
 app.use(express.json());
+
+// ============================================================================
+// x402 payments — official OKX Payment SDK
+// Gates /agent/verify: unpaid requests get an HTTP 402 payment challenge
+// (accepts array + PAYMENT-REQUIRED header); paid requests are verified and
+// settled through the OKX facilitator before the handler runs. Settlement is
+// USDT0 on X Layer (eip155:196). Price is a USD string ("0" = free).
+// ============================================================================
+const X402_NETWORK = (process.env.X402_NETWORK ?? "eip155:196") as `${string}:${string}`;
+const X402_PAY_TO = process.env.X402_PAY_TO ?? "0x00dC0f3ff1F2bca6b3d007684cC25a766c9815f4";
+const X402_PRICE = process.env.X402_PRICE ?? "0"; // USD; "0" = free
+
+const okxFacilitator = new OKXFacilitatorClient({
+  apiKey: process.env.OKX_API_KEY ?? "",
+  secretKey: process.env.OKX_SECRET_KEY ?? "",
+  passphrase: process.env.OKX_PASSPHRASE ?? "",
+  syncSettle: true, // wait for on-chain confirmation before responding
+});
+
+const x402Server = new x402ResourceServer(okxFacilitator).register(X402_NETWORK, new ExactEvmScheme());
+
+const x402Route = {
+  accepts: [{ scheme: "exact", network: X402_NETWORK, payTo: X402_PAY_TO, price: X402_PRICE }],
+  description:
+    "TRACE media-authenticity verification — returns a verdict (VERIFIED_ORIGINAL / MODIFIED / AI_GENERATED / UNVERIFIED) with confidence and on-chain provenance. Provide `url` (JSON) or a `file` upload (multipart).",
+  mimeType: "application/json",
+};
+
+app.use(
+  paymentMiddleware(
+    { "GET /agent/verify": x402Route, "POST /agent/verify": x402Route },
+    x402Server,
+    undefined, // paywallConfig
+    undefined, // paywall
+    false,     // don't sync on start here — we initialize manually below so a
+               // facilitator/credential error can't crash the whole server.
+  ),
+);
+
+// Initialize the resource server (fetches supported kinds from the OKX
+// facilitator). Guarded so a missing/invalid key degrades ONLY /agent/verify —
+// every other route keeps serving. Requires OKX_API_KEY / OKX_SECRET_KEY /
+// OKX_PASSPHRASE from the OKX Developer Portal.
+if (process.env.OKX_API_KEY && process.env.OKX_SECRET_KEY && process.env.OKX_PASSPHRASE) {
+  x402Server
+    .initialize()
+    .then(() => console.log("[x402] OKX facilitator initialized — /agent/verify is payment-gated"))
+    .catch((err: unknown) =>
+      console.error(
+        "[x402] facilitator init failed; /agent/verify will error until OKX credentials are valid:",
+        err instanceof Error ? err.message : err,
+      ),
+    );
+} else {
+  console.warn("[x402] OKX_API_KEY/OKX_SECRET_KEY/OKX_PASSPHRASE not set — /agent/verify payment gate inactive until configured");
+}
 
 // ============================================================================
 // Registry — backed by PostgreSQL (with in-memory + file fallback)
@@ -635,28 +694,13 @@ app.post("/v1/delegate", async (req: Request, res: Response) => {
 
 
 // ============================================================================
-// GET /agent/verify — Discoverable x402 pricing challenge (unpaid)
-// Lets validators (x402-check / x402-validate) read the accepts array.
-// ============================================================================
-app.get("/agent/verify", (req: Request, res: Response) => {
-  return sendChallenge(req, res, "Payment required — POST with an X-PAYMENT header to run a verification.");
-});
-
-// ============================================================================
 // POST /agent/verify — Agent-optimized media verification endpoint
-// Designed for OKX.AI ASP and agent-to-agent calls
+// Designed for OKX.AI ASP and agent-to-agent calls.
+// Payment is enforced upstream by the OKX Payment SDK middleware (see above);
+// this handler only runs after payment is verified and settled.
 // ============================================================================
 app.post("/agent/verify", upload.single("file"), async (req: Request, res: Response) => {
   try {
-    // ── x402 gate ─────────────────────────────────────────────────────────
-    // Emit the 402 payment challenge (with the accepts array) BEFORE any
-    // business/body validation. Only run the verification once payment settles.
-    const payment = await verifyPayment(req);
-    if (!payment.ok) {
-      return sendChallenge(req, res, payment.reason);
-    }
-    if (payment.response) res.setHeader("X-PAYMENT-RESPONSE", payment.response);
-
     // Support both file upload and URL-based verification
     let fileBuffer: Buffer | null = null;
     let mimeType = "image/jpeg";
