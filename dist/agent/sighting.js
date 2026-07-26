@@ -114,16 +114,33 @@ export async function queryBank(contentHash) {
     if (!memwalKey)
         return { known: false, sighting_count: 0 };
     try {
+        // Use PostgreSQL for accurate count — MemWal recall is for semantic search only
+        const { dbGetSightingHistory } = await import("../middleware/db.js");
+        const history = await dbGetSightingHistory(contentHash);
+        if (history.length > 0) {
+            const { recallMemories } = await import("./memwal-integration.js");
+            const memories = await recallMemories(`hash ${contentHash.slice(0, 16)}`, 3).catch(() => []);
+            return {
+                known: true,
+                sighting_count: history.length,
+                first_seen: history[history.length - 1]?.created_at,
+                sources: [...new Set(history.map(h => h.platform))],
+                memories,
+            };
+        }
+        // Fall back to MemWal semantic recall if no DB records yet
         const { recallMemories } = await import("./memwal-integration.js");
         const results = await recallMemories(`hash ${contentHash.slice(0, 16)}`, 5);
-        if (!results.length)
+        const hashPrefix = contentHash.slice(0, 16);
+        const matched = results.filter(r => r.text.includes(hashPrefix));
+        if (!matched.length)
             return { known: false, sighting_count: 0 };
         return {
             known: true,
-            sighting_count: results.length,
-            first_seen: results[results.length - 1]?.text?.match(/Time: ([^.]+)/)?.[1],
-            sources: [...new Set(results.map(r => r.text.match(/Platform: ([^.]+)/)?.[1] ?? "unknown"))],
-            memories: results,
+            sighting_count: matched.length,
+            first_seen: matched[matched.length - 1]?.text?.match(/Time: ([^.]+)/)?.[1],
+            sources: [...new Set(matched.map(r => r.text.match(/Platform: ([^.]+)/)?.[1] ?? "unknown"))],
+            memories: matched,
         };
     }
     catch {

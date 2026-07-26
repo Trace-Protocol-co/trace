@@ -16,7 +16,7 @@ import * as crypto from "crypto";
 
 export const CONFIG = {
   SUI_NETWORK: "testnet" as const,
-  SUI_RPC: process.env.SUI_RPC_URL ?? "https://sui-testnet.nodeinfra.com",
+  SUI_RPC: process.env.SUI_RPC_URL ?? "https://sui-testnet-rpc.publicnode.com",
   PACKAGE_ID: process.env.TRACE_PACKAGE_ID ?? "0x0",
   TREASURY_ID: process.env.TRACE_TREASURY_ID ?? "0x0",
   WALRUS_AGGREGATOR: process.env.WALRUS_AGGREGATOR ?? "https://aggregator.walrus-testnet.walrus.space",

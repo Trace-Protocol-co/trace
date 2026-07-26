@@ -3,7 +3,7 @@
  * Updated for v2 contract: description field, staking, delegation TX builders.
  */
 import "dotenv/config";
-import { SuiJsonRpcClient as SuiClient, getJsonRpcFullnodeUrl as getFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SuiJsonRpcClient as SuiClient } from "@mysten/sui/jsonRpc";
 import { Transaction } from "@mysten/sui/transactions";
 import * as crypto from "crypto";
 // ============================================================================
@@ -11,13 +11,13 @@ import * as crypto from "crypto";
 // ============================================================================
 export const CONFIG = {
     SUI_NETWORK: "testnet",
-    SUI_RPC: getFullnodeUrl("testnet"),
+    SUI_RPC: process.env.SUI_RPC_URL ?? "https://sui-testnet.nodeinfra.com",
     PACKAGE_ID: process.env.TRACE_PACKAGE_ID ?? "0x0",
     TREASURY_ID: process.env.TRACE_TREASURY_ID ?? "0x0",
     WALRUS_AGGREGATOR: process.env.WALRUS_AGGREGATOR ?? "https://aggregator.walrus-testnet.walrus.space",
     WALRUS_PUBLISHER: process.env.WALRUS_PUBLISHER ?? "https://publisher.walrus-testnet.walrus.space",
     WALRUS_EXPLORER: "https://walruscan.com/testnet/blob",
-    WALRUS_EPOCHS: parseInt(process.env.WALRUS_EPOCHS ?? "5"),
+    WALRUS_EPOCHS: parseInt(process.env.WALRUS_EPOCHS ?? "53"),
     CLOCK_ID: "0x6",
 };
 // ============================================================================
